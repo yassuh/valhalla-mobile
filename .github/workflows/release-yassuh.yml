@@ -1,0 +1,336 @@
+name: Yassuh release
+
+# Publishes this fork's iOS and Android builds to a GitHub release, using only GITHUB_TOKEN.
+# Upstream's release.yml needs Maven Central, signing, and PAT secrets, so it skips on forks.
+# FORK.md explains the release assets and how to cut a release.
+
+on:
+  # A release from main. The tag is <version.txt>-yassuh.<revision>.
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Fork revision, such as 1 or 2-rc.1. The tag is <version.txt>-yassuh.<revision>."
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the release as a pre-release (always true for an -rc revision)"
+        required: false
+        type: boolean
+        default: false
+  # The release-candidate label on a pull request publishes a pre-release of that pull request,
+  # tagged <version.txt>-yassuh.0-rc.<run number>, so it can be tested before merging.
+  pull_request:
+    types: [labeled]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One publish at a time. Runs for other pull request labels skip every job, so they get their
+# own group rather than displacing a queued release.
+concurrency:
+  group: >-
+    yassuh-release-${{ github.event_name == 'pull_request' &&
+    github.event.label.name != 'release-candidate' && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # Pull requests from other repositories get a read-only token and cannot publish.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'release-candidate' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Choose the release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REVISION: ${{ inputs.revision }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < version.txt)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version.txt must hold a plain X.Y.Z version, found '$version'."
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if ! [[ "$REVISION" =~ ^[1-9][0-9]*(-rc\.[1-9][0-9]*)?$ ]]; then
+              echo "::error::The revision must look like 1 or 2-rc.1, found '$REVISION'."
+              exit 1
+            fi
+            tag="${version}-yassuh.${REVISION}"
+            prerelease="$PRERELEASE"
+            if [[ "$REVISION" == *-rc.* ]]; then
+              prerelease=true
+            fi
+            if [[ "$prerelease" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::A full release must run from main, not $GITHUB_REF. Mark it as a pre-release instead."
+              exit 1
+            fi
+          else
+            tag="${version}-yassuh.0-rc.${RUN_NUMBER}"
+            prerelease=true
+          fi
+
+          # A published tag is never moved, because Swift Package Manager and the install
+          # scripts pin its checksums.
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null; then
+            echo "::error::Tag ${tag} already exists. Choose the next revision."
+            exit 1
+          fi
+
+          echo "Release tag: ${tag} (pre-release: ${prerelease})"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+  # The release ships the exact binaries these workflows build and test.
+  ios:
+    needs: plan
+    uses: ./.github/workflows/ios.yml
+    permissions:
+      contents: read
+
+  android:
+    needs: plan
+    uses: ./.github/workflows/android.yml
+    permissions:
+      contents: read
+      packages: read
+
+  package-android:
+    needs: [plan, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JNI Libs
+        uses: actions/download-artifact@v4
+        with:
+          name: valhalla-jniLibs
+          path: .
+
+      - name: Unzip JNI Libs
+        run: unzip -q valhalla-jniLibs.zip
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          cache: gradle
+
+      # The CI libraries keep their debug symbols, which makes them several times larger.
+      # Apps get stripped libraries; the symbols ship separately for crash symbolication.
+      - name: Package the native libraries
+        env:
+          NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          strip_tool="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          libs=android/valhalla/src/main/jniLibs
+          mkdir -p dist
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            lib="${libs}/${abi}/libvalhalla-wrapper.so"
+            if [[ ! -s "$lib" ]]; then
+              echo "::error::Missing ${lib}."
+              exit 1
+            fi
+            mkdir -p "staging/symbols/jniLibs/${abi}" "staging/stripped/jniLibs/${abi}"
+            cp "$lib" "staging/symbols/jniLibs/${abi}/"
+            "$strip_tool" --strip-unneeded \
+              -o "staging/stripped/jniLibs/${abi}/libvalhalla-wrapper.so" "$lib"
+            # The AAR below packages the stripped library too.
+            cp "staging/stripped/jniLibs/${abi}/libvalhalla-wrapper.so" "$lib"
+          done
+          ls -l staging/*/jniLibs/*/
+          (cd staging/stripped && zip -qr ../../dist/valhalla-jniLibs.zip jniLibs)
+          (cd staging/symbols && zip -qr ../../dist/valhalla-jniLibs-symbols.zip jniLibs)
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+        working-directory: android
+
+      - name: Assemble the AAR
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: ./gradlew :valhalla:assembleRelease
+        working-directory: android
+
+      - name: Check the AAR holds every ABI
+        run: |
+          set -euo pipefail
+          aar=android/valhalla/build/outputs/aar/valhalla-release.aar
+          contents="$(unzip -l "$aar")"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            if ! grep -q "jni/${abi}/libvalhalla-wrapper.so" <<< "$contents"; then
+              echo "::error::The AAR has no ${abi} library."
+              exit 1
+            fi
+          done
+          cp "$aar" dist/valhalla-mobile.aar
+          ls -l dist
+
+      - name: Upload the Android release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-assets
+          path: dist
+          retention-days: 1
+
+  publish:
+    needs: [plan, ios, package-android]
+    # macOS, because write_xcframework_spm.sh uses BSD sed, as upstream's release does.
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout Valhalla
+        uses: actions/checkout@v4
+
+      - name: Download xcframework artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: valhalla-wrapper.xcframework
+          path: build/apple/valhalla-wrapper.xcframework
+
+      - name: Download the Android release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: android-release-assets
+          path: dist
+
+      - name: Zip the xcframework
+        run: |
+          cd build/apple
+          zip -qry ../../valhalla-wrapper.xcframework.zip valhalla-wrapper.xcframework
+
+      - name: Write the xcframework to Package.swift
+        run: |
+          set -euo pipefail
+          ./scripts/write_xcframework_spm.sh "$TAG"
+          checksum="$(shasum -a 256 valhalla-wrapper.xcframework.zip | awk '{print $1}')"
+          # Fail rather than publish a tag whose Package.swift resolves another build.
+          grep -Fqx "let version: String = \"${TAG}\"" Package.swift
+          grep -Fq "\"https://github.com/${GITHUB_REPOSITORY}/releases/download/\(version)/valhalla-wrapper.xcframework.zip\"" Package.swift
+          grep -Fqx "let binaryChecksum: String = \"${checksum}\"" Package.swift
+          git diff -- Package.swift
+          mv valhalla-wrapper.xcframework.zip dist/
+
+      - name: Record the build
+        run: |
+          set -euo pipefail
+          valhalla_commit="$(git rev-parse HEAD:src/valhalla)"
+          valhalla_url="$(git config -f .gitmodules submodule.src/valhalla.url)"
+          valhalla_tags="$(git ls-remote --tags "$valhalla_url" \
+            | awk -v commit="$valhalla_commit" '$1 == commit { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+            | sort -u | paste -sd ',' -)"
+          source_commit="$(git rev-parse HEAD)"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          export TAG valhalla_commit valhalla_url valhalla_tags source_commit run_url
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          dist = pathlib.Path("dist")
+          assets = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(dist.iterdir())
+          }
+          info = {
+              "tag": os.environ["TAG"],
+              "version": pathlib.Path("version.txt").read_text().strip(),
+              "source_commit": os.environ["source_commit"],
+              "valhalla": {
+                  "repository": os.environ["valhalla_url"],
+                  "commit": os.environ["valhalla_commit"],
+                  "tags": [t for t in os.environ["valhalla_tags"].split(",") if t],
+              },
+              "build_run": os.environ["run_url"],
+              "assets": assets,
+          }
+          (dist / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
+          PY
+
+          (cd dist && shasum -a 256 -- * > ../SHA256SUMS)
+          mv SHA256SUMS dist/
+          cat dist/build-info.json dist/SHA256SUMS
+
+          valhalla_label="${valhalla_tags:-an untagged commit}"
+          {
+            echo "Valhalla Mobile $(cat version.txt) from the yassuh fork, built with Valhalla ${valhalla_label} (\`${valhalla_commit}\`)."
+            echo
+            echo "Built and tested by ${run_url} from \`${source_commit}\`. The release commit adds only the Package.swift binary URL and checksum."
+            echo
+            echo "| Asset | SHA-256 |"
+            echo "|---|---|"
+            while read -r sum name; do
+              echo "| \`${name}\` | \`${sum}\` |"
+            done < dist/SHA256SUMS
+            echo
+            echo "Check a download with \`shasum -a 256 -c SHA256SUMS\`. \`build-info.json\` records the same commits and checksums."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Tag the release commit
+        id: tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "Publish Package.swift for ${TAG} [skip ci]"
+          git tag -a "$TAG" -m "Valhalla Mobile ${TAG}"
+          # Only the tag is pushed, so main keeps upstream's Package.swift and upstream merges stay clean.
+          git push origin "refs/tags/${TAG}"
+
+      - name: Create the release
+        run: |
+          set -euo pipefail
+          flags=(--draft --verify-tag --title "$TAG" --notes-file release-notes.md)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" "${flags[@]}" dist/*
+
+          # Check the uploaded copies before anyone can see the release.
+          mkdir uploaded
+          gh release download "$TAG" --dir uploaded
+          (cd uploaded && shasum -a 256 -c SHA256SUMS)
+
+          gh release edit "$TAG" --draft=false
+
+      # The offline navigation install scripts download with curl and no token.
+      - name: Check the assets download without a token
+        run: |
+          set -euo pipefail
+          mkdir public
+          cd public
+          for name in $(awk '{print $2}' ../dist/SHA256SUMS) SHA256SUMS; do
+            curl -fsSL --retry 5 --retry-all-errors -o "$name" \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${name}"
+          done
+          shasum -a 256 -c SHA256SUMS
+
+      - name: Remove a partial release
+        if: failure() && steps.tag.outcome == 'success'
+        run: gh release delete "$TAG" --yes --cleanup-tag || git push origin --delete "refs/tags/${TAG}"
