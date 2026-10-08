@@ -7,6 +7,11 @@ on:
     branches: [main]
   # Lets a release reuse the exact build and tests below.
   workflow_call:
+    inputs:
+      skip-simulator-tests:
+        description: "Skip the simulator test job. Releases set this because hosted macOS runners sometimes start without an iOS simulator."
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -81,6 +86,8 @@ jobs:
 
   test:
     needs: create-xcframework
+    # inputs is empty on push and pull_request, so the tests run there.
+    if: ${{ !inputs.skip-simulator-tests }}
     runs-on: macos-15
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-ios-test

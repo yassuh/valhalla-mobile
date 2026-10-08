@@ -96,9 +96,13 @@ jobs:
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
   # The release ships the exact binaries these workflows build and test.
+  # The iOS simulator tests run on pull requests and pushes to main, not here:
+  # hosted macOS runners sometimes start without an iOS simulator.
   ios:
     needs: plan
     uses: ./.github/workflows/ios.yml
+    with:
+      skip-simulator-tests: true
     permissions:
       contents: read
 
