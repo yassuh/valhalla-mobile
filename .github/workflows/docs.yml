@@ -7,6 +7,8 @@ on:
 
 jobs:
   dokka:
+    # The API docs are published from upstream only.
+    if: github.repository == 'Rallista/valhalla-mobile'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

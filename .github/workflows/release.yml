@@ -15,6 +15,10 @@ on:
 
 jobs:
   build-ios:
+    # Forks cannot run this release: it needs upstream's Maven Central and signing secrets
+    # and a PAT that pushes to main. Every other job needs build-ios
+    # or build-android, so the whole release skips.
+    if: github.repository == 'Rallista/valhalla-mobile'
     runs-on: macos-15
     strategy:
       matrix:
@@ -88,6 +92,10 @@ jobs:
             valhalla-wrapper.xcframework.zip
 
   build-android:
+    # Forks cannot run this release: it needs upstream's Maven Central and signing secrets
+    # and a PAT that pushes to main. Every other job needs build-ios
+    # or build-android, so the whole release skips.
+    if: github.repository == 'Rallista/valhalla-mobile'
     runs-on: ubuntu-latest
     permissions:
       contents: read

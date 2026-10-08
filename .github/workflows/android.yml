@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets a release reuse the exact build and tests below.
+  workflow_call:
 
 jobs:
   build:
@@ -72,6 +74,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: jniLibs
+          # A calling workflow can hold other artifacts in the same run, such as the iOS slices.
+          pattern: libvalhalla-*
 
       - name: Organize and zip artifacts
         run: |
