@@ -146,6 +146,10 @@ jobs:
         run: |
           set -euo pipefail
           strip_tool="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          nm_tool="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          # The JNI entry points the Kotlin binding calls. Stripping must keep every one
+          # exported, or the published library would fail to load methods at runtime.
+          jni_exports() { "$nm_tool" -D --defined-only "$1" | awk '$2 == "T" && $3 ~ /^Java_/ {print $3}' | sort; }
           libs=android/valhalla/src/main/jniLibs
           mkdir -p dist
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
@@ -158,6 +162,18 @@ jobs:
             cp "$lib" "staging/symbols/jniLibs/${abi}/"
             "$strip_tool" --strip-unneeded \
               -o "staging/stripped/jniLibs/${abi}/libvalhalla-wrapper.so" "$lib"
+            before="$(jni_exports "$lib")"
+            after="$(jni_exports "staging/stripped/jniLibs/${abi}/libvalhalla-wrapper.so")"
+            if [[ -z "$before" ]]; then
+              echo "::error::No JNI exports found in ${lib}."
+              exit 1
+            fi
+            if [[ "$before" != "$after" ]]; then
+              echo "::error::Stripping changed the JNI exports of ${abi}:"
+              diff <(echo "$before") <(echo "$after") || true
+              exit 1
+            fi
+            echo "${abi}: $(echo "$after" | wc -l | tr -d ' ') JNI exports kept after stripping"
             # The AAR below packages the stripped library too.
             cp "staging/stripped/jniLibs/${abi}/libvalhalla-wrapper.so" "$lib"
           done
@@ -334,5 +350,5 @@ jobs:
           shasum -a 256 -c SHA256SUMS
 
       - name: Remove a partial release
-        if: failure() && steps.tag.outcome == 'success'
+        if: (failure() || cancelled()) && steps.tag.outcome == 'success'
         run: gh release delete "$TAG" --yes --cleanup-tag || git push origin --delete "refs/tags/${TAG}"
