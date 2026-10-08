@@ -12,7 +12,8 @@ using only the workflow's `GITHUB_TOKEN`.
   The release needs upstream's Maven Central and signing secrets and a token that pushes to `main`,
   and the docs deploy to upstream's GitHub Pages site.
 - `ios.yml` and `android.yml` can also be called by another workflow,
-  so a release ships the exact binaries that those workflows built and tested.
+  so a release ships the exact binaries that those workflows built.
+  A release skips `ios.yml`'s simulator tests (`skip-simulator-tests`).
 - `scripts/write_xcframework_spm.sh` points `Package.swift` at the releases of the repository it runs in.
 
 Everything else, including `version.txt` and the `Package.swift` on `main`, is upstream's.
@@ -44,7 +45,10 @@ Delete it with `gh release delete <tag> --cleanup-tag` when you are done.
 
 The workflow:
 
-1. Builds and tests iOS and Android with `ios.yml` and `android.yml`.
+1. Builds iOS and Android with `ios.yml` and `android.yml`, and runs the Android tests.
+   It does not run the iOS simulator tests, because GitHub's hosted macOS runners
+   sometimes start without an iOS simulator. Those tests still run on pull requests
+   and pushes to `main`.
 2. Strips the Android libraries and assembles the AAR.
 3. Commits `Package.swift` with this release's URL and checksum on top of the built commit,
    and pushes only the tag, so `main` keeps upstream's `Package.swift`.
