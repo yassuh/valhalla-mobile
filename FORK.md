@@ -36,6 +36,7 @@ gh workflow run release-yassuh.yml -R yassuh/valhalla-mobile --ref main -f revis
 ```
 
 A revision such as `2-rc.1`, or the `prerelease` input, publishes a pre-release instead.
+The workflow refuses to run from any branch other than `main`.
 
 To test a pull request before merging it, add the `release-candidate` label.
 That publishes the pre-release `<version.txt>-yassuh.0-rc.<run number>` from the pull request.

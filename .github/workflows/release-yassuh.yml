@@ -73,8 +73,10 @@ jobs:
             if [[ "$REVISION" == *-rc.* ]]; then
               prerelease=true
             fi
-            if [[ "$prerelease" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
-              echo "::error::A full release must run from main, not $GITHUB_REF. Mark it as a pre-release instead."
+            # Manual releases, including pre-releases, only ever run from main.
+            # Pull request candidates use the separate labelled-PR path below.
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::Manual releases must run from main, not $GITHUB_REF. Use the release-candidate label on a pull request for a branch build."
               exit 1
             fi
           else
