@@ -15,7 +15,7 @@ endif()
 
 target_sources(valhalla-wrapper
                PUBLIC
-               main.cpp valhalla_actor.cpp)
+               main.cpp valhalla_actor.cpp norus_compat.cpp)
 
 target_include_directories(valhalla-wrapper
                            PUBLIC

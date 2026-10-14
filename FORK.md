@@ -1,12 +1,25 @@
 # Yassuh fork
 
 This is the yassuh fork of [Rallista/valhalla-mobile](https://github.com/Rallista/valhalla-mobile).
-It stays as close to upstream as possible and adds one thing:
-CI publishes the iOS and Android builds to this repository's GitHub releases,
+It stays as close to upstream as possible and adds two things:
+it builds the [Norus-Tech/valhalla](https://github.com/Norus-Tech/valhalla) engine
+that the routing server uses,
+and CI publishes the iOS and Android builds to this repository's GitHub releases,
 using only the workflow's `GITHUB_TOKEN`.
 
 ## What differs from upstream
 
+- `src/valhalla` points at a tag of Norus-Tech/valhalla instead of upstream valhalla.
+  Each Norus tag is an upstream release plus the Norus custom edge attributes,
+  organization filters, and server actions.
+  The phone and the server that builds the routing tiles must run the same tag,
+  or the phone misreads the custom edge data.
+- `src/wrapper/norus_compat.cpp` covers the few functions from mjolnir,
+  valhalla's tile-building library, that the Norus engine links on mobile.
+  Mobile builds leave mjolnir out.
+- The Norus organization filter (`sif.filters`) is not in `default.json`.
+  The app that builds the runtime config adds it,
+  because the typed config models here drop keys they do not know.
 - `.github/workflows/release-yassuh.yml` builds, tests, and publishes releases.
 - Upstream's `release.yml` and `docs.yml` skip outside Rallista/valhalla-mobile.
   The release needs upstream's Maven Central and signing secrets and a token that pushes to `main`,
@@ -88,6 +101,20 @@ because GitHub Packages asks for a token even to read a public package.
   Add it with `implementation(files("libs/valhalla-mobile.aar"))`,
   and add the dependencies listed in `android/valhalla/build.gradle.kts` yourself.
 
+## Moving to a new Norus tag
+
+```sh
+git -C src/valhalla fetch origin tag <norus tag>
+git -C src/valhalla checkout <norus tag>
+git add src/valhalla
+git submodule update --init --recursive
+scripts/generate_default_config.sh
+```
+
+Build both platforms and run their tests, since a new tag can link more of mjolnir.
+Then open a pull request and release.
+Tell the team which tag the release builds, so the routing tiles are rebuilt with the same tag.
+
 ## Merging upstream
 
 ```sh
@@ -100,4 +127,7 @@ git submodule update --init --recursive
 Conflicts can only come from the files listed under "What differs from upstream".
 Upstream's release commits change `Package.swift` and `version.txt`,
 and both merge cleanly because the fork never changes them on `main`.
+Upstream also moves `src/valhalla` to a new upstream Valhalla release.
+Keep the submodule on a Norus tag built from that same release,
+and ask Norus for one if it does not exist yet.
 Open a pull request so CI runs, merge it, and then release revision 1 of the new version.
